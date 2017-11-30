@@ -10,6 +10,32 @@ var expect = require("truffle-expect");
 var find_contracts = require("truffle-contract-sources");
 var Config = require("truffle-config");
 var debug = require("debug")("compile");
+var _ = require('lodash')
+
+
+var merge = function(obj, src, prop) {
+    var target = _.get(src, prop)
+    var initial = _.get(obj, prop) !== undefined ? _.get(obj, prop) : {}
+    for (var s in target) {
+        let nextKey = `${prop}.${s}`
+        let pick = _.get(src, nextKey)
+        if (_.isEmpty(target)) {
+            return
+        }
+
+        if (_.isArray(pick)) {
+            if (initial[s] === undefined || initial[s] === null) {
+                _.set(obj, nextKey, pick)
+            } else {
+                _.set(obj, nextKey, pick.concat(initial[s]))
+            }
+        } else if (_.isBoolean(pick) || _.isNumber(pick) || _.isString(pick) || _.isDate(pick)) {
+            _.set(obj, nextKey, pick);
+        } else {
+            merge(obj, src, nextKey)
+        }
+    }
+}
 
 // Most basic of the compile commands. Takes a hash of sources, where
 // the keys are file or module paths and the values are the bodies of
@@ -73,7 +99,6 @@ var compile = function(sources, options, callback) {
     language: "Solidity",
     sources: {},
     settings: {
-      optimizer: options.solc.optimizer,
       outputSelection: {
         "*": {
           "*": [
@@ -88,6 +113,10 @@ var compile = function(sources, options, callback) {
       }
     }
   };
+
+  [Object.keys(options.solc)].forEach(function(prop) {
+      merge(solcStandardInput.settings, options.solc, prop)
+  })
 
   // Nothing to compile? Bail.
   if (Object.keys(sources).length == 0) {
