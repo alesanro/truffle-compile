@@ -1,5 +1,7 @@
 var CompileError = require("./compileerror");
 var solc = require("solc");
+var fs = require("fs");
+var path = require("path");
 
 // Clean up after solc.
 var listeners = process.listeners("uncaughtException");
@@ -9,13 +11,35 @@ if (solc_listener) {
   process.removeListener("uncaughtException", solc_listener);
 }
 
+// Warning issued by a pre-release compiler version, ignored by this component.
+var preReleaseCompilerWarning = "This is a pre-release compiler version, please do not use it in production.";
+
+var installedContractsDir = "installed_contracts"
+
 module.exports = {
   parse: function(body, fileName) {
     // Here, we want a valid AST even if imports don't exist. The way to
     // get around that is to tell the compiler, as they happen, that we
     // have source for them (an empty file).
 
+    var build_remappings = function() {
+      // Maps import paths to paths from EthPM installed contracts, so we can correctly solve imports
+      // e.g. "my_pkg/=installed_contracts/my_pkg/contracts/"
+      var remappings = [];
+
+      if (fs.existsSync('ethpm.json')) {
+        ethpm = JSON.parse(fs.readFileSync('ethpm.json'));
+        for (pkg in ethpm.dependencies) {
+          remappings.push(pkg + "/=" + path.join(installedContractsDir, pkg, 'contracts', '/'));
+        }
+      }
+      
+      return remappings;
+    }
+
     var fileName = fileName || "ParsedContract.sol";
+
+    var remappings = build_remappings();
 
     var solcStandardInput = {
       language: "Solidity",
@@ -25,23 +49,45 @@ module.exports = {
         }
       },
       settings: {
+        remappings: remappings,
         outputSelection: {
-          [fileName]: {
-            "*": ["ast"]
+          "*": {
+            "": [
+              "ast"
+            ]
           }
         }
       }
     };
 
     var output = solc.compileStandard(JSON.stringify(solcStandardInput), function(file_path) {
-      // Tell the compiler we have source code for the dependency
-      return {contents: "pragma solidity ^0.4.0;"};
+      // Resolve dependency manually.
+      if (fs.existsSync(file_path)) {
+        contents = fs.readFileSync(file_path, {encoding: 'UTF-8'});
+      }
+      else {
+        contents = "pragma solidity ^0.4.0;";
+      }
+      return {contents: contents};
     });
 
     output = JSON.parse(output);
 
-    if (output.errors) {
-      throw new CompileError(output.errors[0].formattedMessage);
+    // Filter out the "pre-release compiler" warning, if present.
+    var errors = output.errors ? output.errors.filter(function(solidity_error) {
+      return solidity_error.message.indexOf(preReleaseCompilerWarning) < 0;
+    }) : [];
+
+    // Filter out warnings.
+    var warnings = output.errors ? output.errors.filter(function(solidity_error) {
+      return solidity_error.severity == "warning";
+    }) : [];
+    var errors = output.errors ? output.errors.filter(function(solidity_error) {
+      return solidity_error.severity != "warning";
+    }) : [];
+
+    if (errors.length > 0) {
+      throw new CompileError(errors[0].formattedMessage);
     }
 
     return {
@@ -96,10 +142,16 @@ module.exports = {
 
     output = JSON.parse(output);
 
-    var nonImportErrors = output.errors.filter(function(solidity_error) {
+    // Filter out the "pre-release compiler" warning, if present.
+    var errors = output.errors.filter(function(solidity_error) {
+      return solidity_error.message.indexOf(preReleaseCompilerWarning) < 0;
+    });
+
+    var nonImportErrors = errors.filter(function(solidity_error) {
       // If the import error key is not found, we must not have an import error.
       // This means we have a *different* parsing error which we should show to the user.
       // Note: solc can return multiple parsing errors at once.
+      // We ignore the "pre-release compiler" warning message.
       return solidity_error.formattedMessage.indexOf(importErrorKey) < 0;
     });
 
@@ -110,7 +162,7 @@ module.exports = {
 
     // Now, all errors must be import errors.
     // Filter out our forced import, then get the import paths of the rest.
-    var imports = output.errors.filter(function(solidity_error) {
+    var imports = errors.filter(function(solidity_error) {
       return solidity_error.message.indexOf(failingImportFileName) < 0;
     }).map(function(solidity_error) {
       var matches = solidity_error.formattedMessage.match(/import[^'"]+("|')([^'"]+)("|');/);

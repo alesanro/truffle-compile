@@ -101,9 +101,12 @@ var compile = function(sources, options, callback) {
     settings: {
       outputSelection: {
         "*": {
+          "": [
+            "legacyAST",
+            "ast"
+          ],
           "*": [
             "abi",
-            "ast",
             "evm.bytecode.object",
             "evm.bytecode.sourceMap",
             "evm.deployedBytecode.object",
@@ -162,6 +165,12 @@ var compile = function(sources, options, callback) {
 
   var contracts = standardOutput.contracts;
 
+  var files = [];
+  Object.keys(standardOutput.sources).forEach(function(filename) {
+    var source = standardOutput.sources[filename];
+    files[source.id] = filename;
+  });
+
   var returnVal = {};
 
   // This block has comments in it as it's being prepared for solc > 0.4.10
@@ -177,7 +186,8 @@ var compile = function(sources, options, callback) {
         source: operatingSystemIndependentSources[source_path],
         sourceMap: contract.evm.bytecode.sourceMap,
         deployedSourceMap: contract.evm.deployedBytecode.sourceMap,
-        ast: standardOutput.sources[source_path].legacyAST,
+        legacyAST: standardOutput.sources[source_path].legacyAST,
+        ast: standardOutput.sources[source_path].ast,
         abi: contract.abi,
         bytecode: "0x" + contract.evm.bytecode.object,
         deployedBytecode: "0x" + contract.evm.deployedBytecode.object,
@@ -187,6 +197,10 @@ var compile = function(sources, options, callback) {
           "version": solc.version()
         }
       }
+
+      // Reorder ABI so functions are listed in the order they appear
+      // in the source file. Solidity tests need to execute in their expected sequence.
+      contract_definition.abi = orderABI(contract_definition);
 
       // Go through the link references and replace them with older-style
       // identifiers. We'll do this until we're ready to making a breaking
@@ -221,8 +235,7 @@ var compile = function(sources, options, callback) {
     });
   });
 
-  // TODO: Is the third parameter needed?
-  callback(null, returnVal, Object.keys(sources));
+  callback(null, returnVal, files);
 };
 
 function replaceLinkReferences(bytecode, linkReferences, libraryName) {
@@ -241,6 +254,68 @@ function replaceLinkReferences(bytecode, linkReferences, libraryName) {
 
   return bytecode;
 };
+
+function orderABI(contract){
+  var contract_definition;
+  var ordered_function_names = [];
+  var ordered_functions = [];
+
+  for (var i = 0; i < contract.legacyAST.children.length; i++) {
+    var definition = contract.legacyAST.children[i];
+
+    // AST can have multiple contract definitions, make sure we have the
+    // one that matches our contract
+    if (definition.name !== "ContractDefinition" ||
+        definition.attributes.name !== contract.contract_name){
+      continue;
+    }
+
+    contract_definition = definition;
+    break;
+  }
+
+  if (!contract_definition) return contract.abi;
+  if (!contract_definition.children) return contract.abi;
+
+  contract_definition.children.forEach(function(child) {
+    if (child.name == "FunctionDefinition") {
+      ordered_function_names.push(child.attributes.name);
+    }
+  });
+
+  // Put function names in a hash with their order, lowest first, for speed.
+  var functions_to_remove = ordered_function_names.reduce(function(obj, value, index) {
+    obj[value] = index;
+    return obj;
+  }, {});
+
+  // Filter out functions from the abi
+  var function_definitions = contract.abi.filter(function(item) {
+    return functions_to_remove[item.name] != null;
+  });
+
+  // Sort removed function defintions
+  function_definitions = function_definitions.sort(function(item_a, item_b) {
+    var a = functions_to_remove[item_a.name];
+    var b = functions_to_remove[item_b.name];
+
+    if (a > b) return 1;
+    if (a < b) return -1;
+    return 0;
+  });
+
+  // Create a new ABI, placing ordered functions at the end.
+  var newABI = [];
+  contract.abi.forEach(function(item) {
+    if (functions_to_remove[item.name] != null) return;
+    newABI.push(item);
+  });
+
+  // Now pop the ordered functions definitions on to the end of the abi..
+  Array.prototype.push.apply(newABI, function_definitions);
+
+  return newABI;
+}
 
 
 // contracts_directory: String. Directory where .sol files can be found.
